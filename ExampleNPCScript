@@ -1,9 +1,3 @@
-2: "If you have preferred odds or weightings for enchant rolls (especially for "Super Enchant"), let me know."
-Efficiency, Luck, Reach, Quickness, Nuker.
-For preffered odds, create rudementary weights that you feel would work for now. Same for super enchant. Keep in mind, I do want higher levels to be more rare. Nuker should only be accessed in Super enchants. Super enchants are guaranteed level 2 atleast. 
-I would say moderate rarity, i want players to keep rolling for the best enchants, i dont want them to get max enchants in the first roll. No cap on the amount of enchants per pickaxe. 
-To set it straight, there is a roll for the enchant(Efficiency) then there is a roll for its level-- 1-5, 1-3 for some, and only 1 for Nuker.
-
 -- StarterCharacterScripts/SellNPCController.lua
 
 local CollectionService = game:GetService("CollectionService")
