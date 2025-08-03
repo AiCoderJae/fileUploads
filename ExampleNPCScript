@@ -1,0 +1,407 @@
+-- StarterCharacterScripts/SellNPCController.lua
+local CollectionService = game:GetService("CollectionService")
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local RunService = game:GetService("RunService")
+local player = Players.LocalPlayer
+
+local TweenService = game:GetService("TweenService")
+local Camera = workspace.CurrentCamera
+local ZOOM_IN_FOV = 60 -- or 50 for more dramatic zoom
+local ZOOM_OUT_FOV = 70
+local ZOOM_TIME = 0.25
+
+local isZoomedIn = false
+local activeZoomTween = nil
+
+
+local function fadeInGui(gui)
+	gui.Enabled = true
+
+	for _, obj in ipairs(gui:GetDescendants()) do
+		if obj:IsA("TextButton") or obj:IsA("TextLabel") then
+			obj.TextTransparency = 1 -- ensure it starts invisible
+
+			local tween = TweenService:Create(
+				obj,
+				TweenInfo.new(0.25, Enum.EasingStyle.Quad, Enum.EasingDirection.Out),
+				{ TextTransparency = 0 }
+			)
+			tween:Play()
+		end
+	end
+end
+
+local function zoomOut()
+	if isZoomedIn then
+		if activeZoomTween then
+			activeZoomTween:Cancel()
+		end
+
+		activeZoomTween = TweenService:Create(
+			Camera,
+			TweenInfo.new(ZOOM_TIME, Enum.EasingStyle.Sine, Enum.EasingDirection.Out),
+			{ FieldOfView = ZOOM_OUT_FOV }
+		)
+		activeZoomTween:Play()
+		isZoomedIn = false
+
+		local blur = game:GetService("Lighting"):FindFirstChild("DialogBlur")
+		if blur then blur:Destroy() end
+	end
+end
+
+local currentTextTween = nil
+local currentImageTween = nil
+local activeTalkTimeout = nil
+
+local function setupSellNPC(npc)
+	if not npc:IsA("Model") then
+		warn("[SellNPC] Tagged object is not a Model:", npc:GetFullName())
+		return
+	end
+
+	--print("[SellNPC] Found tagged NPC:", npc:GetFullName())
+
+	local head = npc:WaitForChild("Head", 5)
+	local prompt = npc:FindFirstChildWhichIsA("ProximityPrompt", true)
+
+	if not (head and prompt) then
+		warn("[SellNPC] Missing Head or ProximityPrompt in:", npc:GetFullName())
+		return
+	end
+
+	local guiTemplate = head:WaitForChild("SellDialogGui", 5)
+	if not guiTemplate then
+		warn("[SellNPC] Missing SellDialogGui in Head:", head:GetFullName())
+		return
+	end
+
+	guiTemplate.Enabled = false
+
+	local playerGui = player:WaitForChild("PlayerGui")
+	local gui = guiTemplate:Clone()
+	gui.Name = "SellDialogGui_" .. npc:GetFullName()
+	gui.Parent = playerGui
+	local char = player.Character or player.CharacterAdded:Wait()
+	local root = char:WaitForChild("HumanoidRootPart")
+	gui.Adornee = root
+	gui.StudsOffset = Vector3.new(10, 0, 0) -- offset to the side
+	gui.Enabled = false
+
+	-- Clone the SellTalkDialogGui
+	local talkTemplate = head:FindFirstChild("SellTalkGui")
+	if not talkTemplate then
+		warn("[SellNPC] Missing SellTalkGui in Head:", head:GetFullName())
+	else
+		talkTemplate.Enabled = false
+		local talkGui = talkTemplate:Clone()
+		talkGui.Name = "SellTalkGui_" .. npc:GetFullName()
+		talkGui.Parent = playerGui
+		talkGui.Adornee = head
+		talkGui.Enabled = false
+	end
+
+	-- Get all 4 buttons
+	local frame1 = gui:WaitForChild("1", 5)
+	local frame2 = gui:WaitForChild("2", 5)
+	local frame3 = gui:WaitForChild("3", 5)
+	local frame4 = gui:WaitForChild("4", 5)
+
+	local sellBtn = frame1:WaitForChild("SellButton", 5)
+	local singleSellBtn = frame2:WaitForChild("SingleSellButton", 5)
+	local appraiseBtn = frame3:WaitForChild("AppraiseButton", 5)
+	local cancelBtn = frame4:WaitForChild("CancelButton", 5)
+
+	local allButtons = {
+		sellBtn,
+		singleSellBtn,
+		appraiseBtn,
+		cancelBtn
+	}
+
+	-- Reset all buttons back to normal
+	local function resetButtonFocus()
+		for _, btn in ipairs(allButtons) do
+			btn.TextTransparency = 0
+		end
+	end
+
+	-- Highlight the hovered/clicked button and dim others
+	local function focusButton(activeButton)
+		resetButtonFocus()
+		for _, btn in ipairs(allButtons) do
+			if btn ~= activeButton then
+				btn.TextTransparency = 0.5
+			end
+		end
+	end
+
+	-- Connect hover and click logic
+	local currentFocusedBtn = nil
+
+	local function updateFocus(newFocusedBtn)
+		-- Reset all to 0
+		for _, btn in ipairs(allButtons) do
+			btn.TextTransparency = 0
+		end
+
+		-- Dim all others
+		for _, btn in ipairs(allButtons) do
+			if btn ~= newFocusedBtn then
+				btn.TextTransparency = 0.5
+			end
+		end
+
+		currentFocusedBtn = newFocusedBtn
+	end
+
+	local function clearFocus()
+		for _, btn in ipairs(allButtons) do
+			btn.TextTransparency = 0
+		end
+		currentFocusedBtn = nil
+	end
+
+	for _, btn in ipairs(allButtons) do
+		-- Hover (PC)
+		btn.MouseEnter:Connect(function()
+			updateFocus(btn)
+		end)
+
+		btn.MouseLeave:Connect(function()
+			-- Only clear if we're not hovering another button
+			if currentFocusedBtn == btn then
+				clearFocus()
+			end
+		end)
+
+		-- Click (Mobile)
+		btn.MouseButton1Down:Connect(function()
+			updateFocus(btn)
+		end)
+
+		btn.MouseButton1Up:Connect(function()
+			clearFocus()
+		end)
+	end
+
+	--print("[SellNPC] GUI clone set up for:", npc:GetFullName())
+
+	local Remotes = ReplicatedStorage:WaitForChild("Remotes")
+	local SellOres = Remotes:WaitForChild("SellOres")
+	local SellEquippedOre = Remotes:WaitForChild("SellEquippedOre")
+	local AppraiseEquippedOre = Remotes:WaitForChild("AppraiseEquippedOre")
+	
+	-- Utility: show text in SellTalkGui
+	local function showTalk(text)
+		local talkGui = playerGui:FindFirstChild("SellTalkGui_" .. npc:GetFullName())
+		local dialogContainer = talkGui and talkGui:FindFirstChild("DialogContainer")
+		local dialogText = dialogContainer and dialogContainer:FindFirstChild("DialogText")
+		local backgroundImage = dialogContainer and dialogContainer:FindFirstChildWhichIsA("ImageLabel")
+
+		if not (talkGui and dialogText and backgroundImage) then return end
+
+		-- Cancel any ongoing tweens and timeout
+		if currentTextTween then currentTextTween:Cancel() end
+		if currentImageTween then currentImageTween:Cancel() end
+		if activeTalkTimeout then task.cancel(activeTalkTimeout) end
+
+		talkGui.Enabled = true
+		dialogText.Text = text
+
+		local originalImageTransparency = backgroundImage.ImageTransparency
+		dialogText.TextTransparency = 1
+		backgroundImage.ImageTransparency = 1
+
+		-- Fade in both
+		local tweenInfo = TweenInfo.new(0.3, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+		currentTextTween = TweenService:Create(dialogText, tweenInfo, { TextTransparency = 0 })
+		currentImageTween = TweenService:Create(backgroundImage, tweenInfo, { ImageTransparency = originalImageTransparency })
+		currentTextTween:Play()
+		currentImageTween:Play()
+
+		-- Delay and fade out both
+		activeTalkTimeout = task.delay(3.5, function()
+			local fadeOutText = TweenService:Create(dialogText, tweenInfo, { TextTransparency = 1 })
+			local fadeOutImage = TweenService:Create(backgroundImage, tweenInfo, { ImageTransparency = 1 })
+
+			fadeOutText:Play()
+			fadeOutImage:Play()
+
+			task.delay(0.3, function()
+				talkGui.Enabled = false
+				backgroundImage.ImageTransparency = originalImageTransparency
+			end)
+		end)
+	end
+	
+	-- Show GUI on prompt
+	prompt.Triggered:Connect(function(triggeringPlayer)
+		if triggeringPlayer == player then
+			if not isZoomedIn then
+				if activeZoomTween then
+					activeZoomTween:Cancel()
+				end
+
+				activeZoomTween = TweenService:Create(
+					Camera,
+					TweenInfo.new(ZOOM_TIME, Enum.EasingStyle.Sine, Enum.EasingDirection.Out),
+					{ FieldOfView = ZOOM_IN_FOV }
+				)
+				activeZoomTween:Play()
+				isZoomedIn = true
+			end
+
+			fadeInGui(gui)
+			gui.Enabled = true
+		end
+	end)
+
+	local cancelDialogues = {
+		"Okay, maybe next time!",
+		"Take your time, no rush.",
+		"Changed your mind? No problem.",
+		"Come back if you need anything!",
+		"See you around!"
+	}
+
+	cancelBtn.MouseButton1Click:Connect(function()
+		local randomIndex = math.random(1, #cancelDialogues)
+		local chosenLine = cancelDialogues[randomIndex]
+		showTalk(chosenLine)
+
+		gui.Enabled = false
+
+		if isZoomedIn then
+			local zoomOutTween = TweenService:Create(
+				Camera,
+				TweenInfo.new(ZOOM_TIME, Enum.EasingStyle.Sine, Enum.EasingDirection.Out),
+				{ FieldOfView = ZOOM_OUT_FOV }
+			)
+			zoomOutTween:Play()
+			isZoomedIn = false
+		end
+
+		local blur = game:GetService("Lighting"):FindFirstChild("DialogBlur")
+		if blur then blur:Destroy() end
+	end)
+
+	-- Hide GUI when player leaves the prompt range
+	local MAX_DISTANCE = 15
+	RunService.Heartbeat:Connect(function()
+		if not gui.Enabled then return end
+
+		local character = player.Character
+		local hrp = character and character:FindFirstChild("HumanoidRootPart")
+		local npcHRP = npc:FindFirstChild("HumanoidRootPart") or npc.PrimaryPart
+		if not npcHRP or not npcHRP:IsA("BasePart") then return end
+
+		if hrp and npcHRP then
+			local dist = (hrp.Position - npcHRP.Position).Magnitude
+			if dist > MAX_DISTANCE then
+				gui.Enabled = false
+
+				if isZoomedIn then
+					local zoomOutTween = TweenService:Create(
+						Camera,
+						TweenInfo.new(ZOOM_TIME, Enum.EasingStyle.Sine, Enum.EasingDirection.Out),
+						{ FieldOfView = ZOOM_OUT_FOV }
+					)
+					zoomOutTween:Play()
+					isZoomedIn = false
+				end
+
+				local blur = game:GetService("Lighting"):FindFirstChild("DialogBlur")
+				if blur then blur:Destroy() end
+			end
+		end
+	end)
+
+	-- Sell all ores
+	sellBtn.MouseButton1Click:Connect(function()
+		local richesEarned = SellOres:InvokeServer()
+		gui.Enabled = false
+		zoomOut()
+
+		if richesEarned == 0 then
+			showTalk("You’ve got nothing to sell!")
+		else
+			showTalk("Sold ores for $" .. tostring(richesEarned) .. "!")
+		end
+	end)
+
+	-- Sell equipped ore only
+	singleSellBtn.MouseButton1Click:Connect(function()
+		local richesEarned = SellEquippedOre:InvokeServer()
+		gui.Enabled = false
+		zoomOut()
+
+		if richesEarned == 0 then
+			local equipped = player.Character and player.Character:FindFirstChildOfClass("Tool")
+			if equipped and equipped:GetAttribute("IsFavorited") then
+				showTalk("Hey! Looks like you're saving that one.")
+			else
+				showTalk("Nothing equipped to sell!")
+			end
+		else
+			showTalk("Sold for $" .. tostring(richesEarned) .. "!")
+		end
+	end)
+	
+	-- Appraise equipped ore
+	appraiseBtn.MouseButton1Click:Connect(function()
+		local value = AppraiseEquippedOre:InvokeServer()
+		gui.Enabled = false
+		zoomOut()
+		if value == 0 then
+			showTalk("Nothing in your hand to appraise!")
+		else
+			showTalk("This is worth $" .. tostring(value) .. ".")
+		end
+	end)
+	-- 💬 Proximity Greeting (non-repeating while in range)
+	local talkGui = playerGui:FindFirstChild("SellTalkGui_" .. npc:GetFullName())
+	local dialogContainer = talkGui and talkGui:FindFirstChild("DialogContainer")
+	local dialogText = dialogContainer and dialogContainer:FindFirstChild("DialogText")
+	local imageLabel = dialogContainer and dialogContainer:FindFirstChild("ImageLabel")
+
+	local originalImageTransparency = imageLabel and imageLabel.ImageTransparency or 0.3
+
+	local greetingLines = {
+		"Got anything to sell?",
+		"Looking to appraise?",
+		"Back so soon?",
+		"Welcome back, merchant!",
+		"Need to lighten that load?",
+	}
+
+	local wasInRangeLastFrame = false
+	local GREETING_RANGE = 10
+
+	RunService.Heartbeat:Connect(function()
+		if not (talkGui and dialogText and imageLabel) then return end
+
+		local character = player.Character
+		local hrp = character and character:FindFirstChild("HumanoidRootPart")
+		local npcHRP = npc:FindFirstChild("HumanoidRootPart") or npc.PrimaryPart
+		if not (hrp and npcHRP) then return end
+
+		local dist = (hrp.Position - npcHRP.Position).Magnitude
+		local inRange = dist <= GREETING_RANGE
+
+		if inRange and not wasInRangeLastFrame then
+			local line = greetingLines[math.random(1, #greetingLines)]
+			showTalk(line)
+		end
+
+		wasInRangeLastFrame = inRange
+	end)
+
+end
+
+for _, npc in ipairs(CollectionService:GetTagged("SellNPC")) do
+	setupSellNPC(npc)
+end
+
+CollectionService:GetInstanceAddedSignal("SellNPC"):Connect(setupSellNPC)
